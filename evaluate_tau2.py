@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""
-Evaluate a trained checkpoint on tau2-bench telecom tasks.
-
-This script uses the same AgentGymEnv as training but runs evaluation
-on the test split to measure pass@1.
+"""Evaluate a trained checkpoint on tau2-bench tasks.
 
 Usage:
-    # On the training server, after SFT or RL:
-    python evaluate_tau2.py \
-        --checkpoint /ephemeral/checkpoints/Qwen3-4B-sft-telecom-v2/iter_XXXXX/ \
-        --output-path eval_results.json \
-        --num-tasks 25  # or omit to run all test tasks
+    python evaluate_tau2.py --checkpoint /path/to/checkpoint --output-path eval_results.json
 """
 
 import argparse
@@ -27,12 +19,10 @@ import httpx
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Standalone HTTP client for evaluation (doesn't require slime's init_http_client)
 _eval_http_client: httpx.AsyncClient = None
 
 
 async def _ensure_http_client():
-    """Lazily initialize the HTTP client."""
     global _eval_http_client
     if _eval_http_client is None:
         _eval_http_client = httpx.AsyncClient(
@@ -43,7 +33,6 @@ async def _ensure_http_client():
 
 
 async def post_standalone(url: str, payload: dict, max_retries: int = 60):
-    """Standalone async POST function for evaluation."""
     client = await _ensure_http_client()
     retry_count = 0
     while retry_count < max_retries:
@@ -53,23 +42,18 @@ async def post_standalone(url: str, payload: dict, max_retries: int = 60):
             return response.json()
         except Exception as e:
             retry_count += 1
-            logger.info(f"POST error: {e}, retrying... (attempt {retry_count}/{max_retries})")
+            logger.info(f"POST error: {e}, retrying ({retry_count}/{max_retries})")
             await asyncio.sleep(1.0)
     raise RuntimeError(f"Failed to POST to {url} after {max_retries} retries")
 
-# Partial score computation (inline to avoid slime import dependencies)
-# This mirrors the logic in tau2_reward_shaping.py
+
 ACTION_WEIGHT = 0.5
 COMMUNICATE_WEIGHT = 0.3
 ASSERTION_WEIGHT = 0.2
 
 
 def compute_partial_score(reward_info: dict) -> float:
-    """Compute partial credit from tau2 reward_info.
-
-    Empty check lists are treated as neutral (1.0) - no penalty for tasks
-    that don't have certain check types.
-    """
+    """Compute partial credit from tau2 reward_info."""
     action_checks = reward_info.get("action_checks") or []
     if action_checks:
         matched = sum(1 for ac in action_checks if ac.get("action_match"))
@@ -123,7 +107,6 @@ async def evaluate_single_task(
     user_llm: str = "gemini/gemini-2.5-flash-lite",
     max_steps: int = 30,
 ) -> EvalResult:
-    """Evaluate a single task using the gym environment."""
     try:
         env = env_class(
             domain=domain,
@@ -141,19 +124,17 @@ async def evaluate_single_task(
 
         messages = [{"role": "system", "content": policy}]
         if observation:
-            lines = observation.strip().split("\n")
-            for line in lines:
-                if not line.strip():
+            for line in observation.strip().split("\n"):
+                if not line.strip() or ": " not in line:
                     continue
-                if ": " in line:
-                    role, content = line.split(": ", 1)
-                    role = role.strip().lower()
-                    if role == "assistant":
-                        messages.append({"role": "assistant", "content": content})
-                    elif role == "user":
-                        messages.append({"role": "user", "content": content})
-                    else:
-                        messages.append({"role": "tool", "name": role, "content": content})
+                role, content = line.split(": ", 1)
+                role = role.strip().lower()
+                if role == "assistant":
+                    messages.append({"role": "assistant", "content": content})
+                elif role == "user":
+                    messages.append({"role": "user", "content": content})
+                else:
+                    messages.append({"role": "tool", "name": role, "content": content})
 
         TOOL_INSTRUCTION = (
             " At each turn, you are allowed to call one or no function to assist "
@@ -183,13 +164,8 @@ async def evaluate_single_task(
 
             if output["meta_info"]["finish_reason"]["type"] == "abort":
                 return EvalResult(
-                    task_id=task_id,
-                    task_index=task_index,
-                    reward=0.0,
-                    success=False,
-                    steps=step_count,
-                    status="aborted",
-                    error="Generation aborted",
+                    task_id=task_id, task_index=task_index, reward=0.0, success=False,
+                    steps=step_count, status="aborted", error="Generation aborted",
                 )
 
             response = output["text"]
@@ -199,12 +175,8 @@ async def evaluate_single_task(
             openai_result = openai_adapter.parse_response_to_openai_format(response)
             if not openai_result["success"]:
                 return EvalResult(
-                    task_id=task_id,
-                    task_index=task_index,
-                    reward=0.0,
-                    success=False,
-                    steps=step_count,
-                    status="parse_error",
+                    task_id=task_id, task_index=task_index, reward=0.0, success=False,
+                    steps=step_count, status="parse_error",
                     error=openai_result.get("error", "Unknown parse error"),
                 )
 
@@ -212,8 +184,6 @@ async def evaluate_single_task(
             messages.append({"role": "assistant", "content": response})
 
             calls = parsed.get("calls", [])
-            normal_text = parsed.get("normal_text", "")
-
             if calls:
                 tool_call = calls[0]
                 action = json.dumps({
@@ -221,7 +191,7 @@ async def evaluate_single_task(
                     "arguments": json.loads(tool_call["parameters"]),
                 })
             else:
-                action = normal_text
+                action = parsed.get("normal_text", "")
 
             observation, reward, terminated, truncated, info = env.step(action)
             total_reward = reward
@@ -233,47 +203,34 @@ async def evaluate_single_task(
 
             if observation:
                 obs_messages = [{"role": "system", "content": policy}]
-                lines = observation.strip().split("\n")
-                for line in lines:
-                    if not line.strip():
+                for line in observation.strip().split("\n"):
+                    if not line.strip() or ": " not in line:
                         continue
-                    if ": " in line:
-                        role, content = line.split(": ", 1)
-                        role = role.strip().lower()
-                        if role == "assistant":
-                            obs_messages.append({"role": "assistant", "content": content})
-                        elif role == "user":
-                            obs_messages.append({"role": "user", "content": content})
-                        else:
-                            obs_messages.append({"role": "tool", "name": role, "content": content})
+                    role, content = line.split(": ", 1)
+                    role = role.strip().lower()
+                    if role == "assistant":
+                        obs_messages.append({"role": "assistant", "content": content})
+                    elif role == "user":
+                        obs_messages.append({"role": "user", "content": content})
+                    else:
+                        obs_messages.append({"role": "tool", "name": role, "content": content})
 
                 for msg in obs_messages[1:]:
                     if msg not in messages:
                         messages.append(msg)
 
-        success = total_reward > 0.5
-        status = "completed" if terminated else "truncated"
-
         return EvalResult(
-            task_id=task_id,
-            task_index=task_index,
-            reward=total_reward,
-            success=success,
-            steps=step_count,
-            status=status,
+            task_id=task_id, task_index=task_index, reward=total_reward,
+            success=total_reward > 0.5, steps=step_count,
+            status="completed" if terminated else "truncated",
             reward_info=final_reward_info,
         )
 
     except Exception as e:
         logger.error(f"Error evaluating task {task_id}: {e}")
         return EvalResult(
-            task_id=task_id,
-            task_index=task_index,
-            reward=0.0,
-            success=False,
-            steps=0,
-            status="error",
-            error=str(e),
+            task_id=task_id, task_index=task_index, reward=0.0, success=False,
+            steps=0, status="error", error=str(e),
         )
 
 
@@ -285,7 +242,6 @@ async def run_evaluation(
     domain: str = "telecom",
     task_split: str = "test",
 ):
-    """Run evaluation on tau2-bench tasks."""
     from tau2.gym.gym_agent import AgentGymEnv
     from tau2.registry import registry
     from transformers import AutoTokenizer
@@ -304,11 +260,7 @@ async def run_evaluation(
     logger.info(f"Evaluating {len(task_ids)} {task_split} tasks")
 
     sglang_url = f"http://127.0.0.1:{sglang_port}/generate"
-    sampling_params = {
-        "temperature": 0.0,
-        "max_new_tokens": 1024,
-        "top_p": 1.0,
-    }
+    sampling_params = {"temperature": 0.0, "max_new_tokens": 1024, "top_p": 1.0}
 
     results: List[EvalResult] = []
 
@@ -333,7 +285,6 @@ async def run_evaluation(
     total = len(results)
     pass_at_1 = successes / total if total > 0 else 0.0
 
-    # Compute partial scores from reward_info
     partial_scores = []
     for r in results:
         if r.reward_info:
@@ -358,15 +309,9 @@ async def run_evaluation(
         "avg_partial_score": avg_partial,
         "results": [
             {
-                "task_id": r.task_id,
-                "task_index": r.task_index,
-                "reward": r.reward,
-                "success": r.success,
-                "steps": r.steps,
-                "status": r.status,
-                "error": r.error,
-                "partial_score": r.partial_score,
-                "reward_info": r.reward_info,
+                "task_id": r.task_id, "task_index": r.task_index, "reward": r.reward,
+                "success": r.success, "steps": r.steps, "status": r.status,
+                "error": r.error, "partial_score": r.partial_score, "reward_info": r.reward_info,
             }
             for r in results
         ],
@@ -376,7 +321,7 @@ async def run_evaluation(
         json.dump(summary, f, indent=2)
 
     logger.info(f"\n{'='*50}")
-    logger.info(f"EVALUATION SUMMARY")
+    logger.info("EVALUATION SUMMARY")
     logger.info(f"{'='*50}")
     logger.info(f"Checkpoint: {checkpoint_path}")
     logger.info(f"Tasks: {total} ({task_split} split)")
@@ -391,42 +336,12 @@ async def run_evaluation(
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate tau2-bench checkpoint")
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
-        help="Path to the checkpoint directory",
-    )
-    parser.add_argument(
-        "--output-path",
-        type=str,
-        default="eval_results.json",
-        help="Output path for evaluation results",
-    )
-    parser.add_argument(
-        "--num-tasks",
-        type=int,
-        default=None,
-        help="Number of tasks to evaluate (default: all)",
-    )
-    parser.add_argument(
-        "--sglang-port",
-        type=int,
-        default=30000,
-        help="SGLang server port",
-    )
-    parser.add_argument(
-        "--domain",
-        type=str,
-        default="telecom",
-        help="tau2 domain",
-    )
-    parser.add_argument(
-        "--task-split",
-        type=str,
-        default="test",
-        help="Task split to evaluate (train/test)",
-    )
+    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--output-path", type=str, default="eval_results.json")
+    parser.add_argument("--num-tasks", type=int, default=None)
+    parser.add_argument("--sglang-port", type=int, default=30000)
+    parser.add_argument("--domain", type=str, default="telecom")
+    parser.add_argument("--task-split", type=str, default="test")
     args = parser.parse_args()
 
     asyncio.run(
