@@ -1,30 +1,33 @@
 # Tau2 Telecom Warmup on slime
 
-This folder contains a minimal Tau2 telecom warmup on top of slime, using Qwen3-4B-Instruct and the Tau2 dual-control environment.
+Minimal Tau2 telecom warmup on top of slime, using Qwen3-4B-Instruct and the Tau2 dual-control environment.
 
-The core pieces are:
-- `tau2_reward_shaping.py` – partial-credit reward shaping using Tau2 `action_checks`, `communicate_checks`, and `env_assertions`.
-- `tau2_mock.py` – preprocess Tau2 telecom tasks into JSONL for slime.
-- `evaluate_tau2.py` – evaluate a trained checkpoint on Tau2 telecom test tasks (pass@1 + partial scores).
+## Core files
+
+- `tau2_reward_shaping.py` – partial-credit reward shaping using Tau2 `action_checks`, `communicate_checks`, and `env_assertions`
+- `openai_tool_adapter.py` – converts sglang tool call parsing to OpenAI-compatible format
+- `tau2_mock.py` – preprocess Tau2 telecom tasks into JSONL for slime
+- `evaluate_tau2.py` – evaluate a trained checkpoint on Tau2 telecom test tasks (pass@1 + partial scores)
 
 ## 1. Environment and data
 
-Follow `examples/tau-bench/SETUP_GUIDE.md` up through:
-- cloning `THUDM/slime` and `sierra-research/tau2-bench`
-- installing `tau2-bench` and required Python packages
-- downloading and converting `Qwen/Qwen3-4B-Instruct`
-- running `tau2_mock.py` to produce `telecom_train_tasks.jsonl` / `telecom_test_tasks.jsonl`
+Prerequisites:
+- Clone `THUDM/slime` and `sierra-research/tau2-bench`
+- Install `tau2-bench` and required Python packages
+- Download and convert `Qwen/Qwen3-4B-Instruct`
 
-Key command:
+Preprocess Tau2 tasks:
 
 ```bash
 cd /root/slime
 python examples/tau-bench/tau2_mock.py --local_dir /root/tau2-bench/
 ```
 
+This produces `telecom_train_tasks.jsonl` and `telecom_test_tasks.jsonl`.
+
 ## 2. SFT warmup (telecom teacher traces)
 
-Use the SFT job from `SETUP_GUIDE.md` to train a small SFT model on teacher traces:
+Download the SFT dataset: [tau2-sft-v4-dataset](https://huggingface.co/datasets/Jarrodbarnes/tau2-sft-v4-dataset)
 
 ```bash
 cd /root/slime
@@ -70,11 +73,7 @@ ray job submit --address="http://127.0.0.1:8265" \
   ${DISTRIBUTED_ARGS[@]}
 ```
 
-This produces SFT checkpoints under `/root/Qwen3-4B-Instruct-2507_sft_telecom/`.
-
-## 3. GRPO baseline + reward shaping
-
-For RL, use the Tau2 telecom setup from `SETUP_GUIDE.md`, then enable reward shaping:
+## 3. GRPO + reward shaping
 
 ```bash
 cd /root/slime
@@ -131,15 +130,11 @@ ray job submit --address="http://127.0.0.1:8265" \
   --attention-softmax-in-fp32
 ```
 
-This uses `tau2_reward_shaping.py` to add partial credit based on Tau2 environment signals while keeping the original binary reward for evaluation.
+Uses `tau2_reward_shaping.py` to add partial credit based on Tau2 environment signals while keeping the original binary reward for evaluation.
 
-## 4. Evaluation on Tau2 telecom
-
-After RL, evaluate a checkpoint on Tau2 telecom test tasks with `evaluate_tau2.py`:
+## 4. Evaluation
 
 ```bash
-cd /root/slime/examples/tau-bench
-
 python evaluate_tau2.py \
   --checkpoint /root/Qwen3-4B-Instruct-2507_rl_telecom/iter_0000100/ \
   --output-path /root/tau2_eval_results.json \
@@ -149,8 +144,4 @@ python evaluate_tau2.py \
   --task-split test
 ```
 
-The script reports:
-- pass@1 success rate
-- average reward
-- average partial score (using Tau2 `reward_info`)
-
+Reports pass@1 success rate, average reward, and average partial score.
